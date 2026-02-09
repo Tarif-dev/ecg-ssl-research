@@ -1,1 +1,26 @@
+# Core ML
+torch>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
 
+# ECG data
+wfdb>=4.1.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Metrics
+scikit-learn>=1.2.0
+
+# Experiment tracking (optional but recommended)
+wandb>=0.15.0
+
+# Config
+pyyaml>=6.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# Data handling
+pandas>=2.0.0

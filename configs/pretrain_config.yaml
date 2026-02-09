@@ -1,1 +1,40 @@
-# Pretraining configuration
+# ============================================================
+# Stage 1: Self-Supervised Pre-training Configuration
+# ============================================================
+
+model:
+  patch_size: 50 # samples per patch (100ms @ 500Hz)
+  embed_dim: 128 # transformer hidden dimension
+  depth: 6 # number of encoder layers
+  num_heads: 8 # attention heads (head_dim = 128/8 = 16)
+  mlp_ratio: 4 # MLP hidden = 128 * 4 = 512
+  dropout: 0.1
+  decoder_depth: 2 # lightweight decoder
+  mask_ratio: 0.75 # aggressive masking (75%)
+
+training:
+  epochs: 100
+  batch_size: 256
+  learning_rate: 1.0e-4
+  weight_decay: 0.05
+  warmup_epochs: 10
+  gradient_clip: 1.0
+  num_workers: 2 # Colab limitation
+
+data:
+  segment_duration: 10 # seconds
+  overlap: 0.75 # 75% overlap between segments
+  lowcut: 0.5 # Hz — remove baseline wander
+  highcut: 40.0 # Hz — remove high-freq noise
+  filter_order: 5
+
+augmentation:
+  scale_range: [0.9, 1.1]
+  noise_std: 0.01
+  time_shift_ratio: 0.1
+
+logging:
+  log_interval: 100 # log every N batches
+  save_interval: 10 # save checkpoint every N epochs
+  wandb_project: "ecg-ssl-research"
+  wandb_group: "pretraining"

@@ -1,17 +1,44 @@
-# Data and checkpoints
-/data/
+# Data files (too large for Git)
+data/
+0_data/
+*.npy
+*.dat
+*.hea
+*.atr
+*.xyz
+
+# Model checkpoints
+*.pt
+*.pth
 checkpoints/
+2_experiments/
 
 # Python
 __pycache__/
+*.py[cod]
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
 
 # Jupyter
 .ipynb_checkpoints/
 
-# Env
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
 .venv/
 venv/
-.env
+
+# W&B
+wandb/
