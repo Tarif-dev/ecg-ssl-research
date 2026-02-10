@@ -24,11 +24,7 @@ def get_device():
     if torch.cuda.is_available():
         device = torch.device("cuda")
         gpu_name = torch.cuda.get_device_name(0)
-        try:
-            gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-        except AttributeError:
-            gpu_mem = 0
-        print(f"✓ Using GPU: {gpu_name} ({gpu_mem:.1f} GB)")
+        print(f"✓ Using GPU: {gpu_name}")
     else:
         device = torch.device("cpu")
         print("⚠ No GPU available — using CPU (training will be slow)")
