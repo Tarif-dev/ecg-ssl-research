@@ -1,25 +1,16 @@
-"""Data preprocessing, PyTorch Datasets, DataLoaders, and few-shot sampling."""
+"""Data preprocessing, datasets, and dataloader factories for ECG SSL pipeline."""
 
-import os
-import json
+from __future__ import annotations
+
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
 from scipy import signal as scipy_signal
-
-
-# ============================================================================
-# Preprocessing Functions
-# ============================================================================
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, Dataset
 
 
 def bandpass_filter(sig, fs, lowcut=0.5, highcut=40.0, order=5):
-    """
-    Butterworth bandpass filter to remove noise from ECG.
-    - 0.5 Hz: removes baseline wander (breathing, electrode drift)
-    - 40 Hz: removes muscle noise & powerline interference
-    - filtfilt: zero-phase (no distortion)
-    """
+    """Butterworth bandpass filter for ECG denoising."""
     nyq = 0.5 * fs
     low = max(lowcut / nyq, 1e-5)
     high = min(highcut / nyq, 1.0 - 1e-5)
@@ -29,67 +20,73 @@ def bandpass_filter(sig, fs, lowcut=0.5, highcut=40.0, order=5):
 
 
 def zscore_normalize(sig, eps=1e-8):
-    """Per-signal z-score normalization (zero mean, unit variance)."""
+    """Per-sample z-score normalization."""
     mean = np.mean(sig)
     std = np.std(sig)
     return ((sig - mean) / (std + eps)).astype(np.float32)
 
 
 def preprocess_signal(sig, fs, lowcut=0.5, highcut=40.0, order=5):
-    """Full preprocessing: bandpass filter → z-score normalization."""
-    filtered = bandpass_filter(sig, fs, lowcut, highcut, order)
-    normalized = zscore_normalize(filtered)
-    return normalized
+    """Bandpass then z-score normalize."""
+    return zscore_normalize(bandpass_filter(sig, fs, lowcut=lowcut, highcut=highcut, order=order))
 
 
 def patchify(segment, patch_size=50):
-    """Divide 1D segment into non-overlapping patches. Returns [N, patch_size]."""
+    """Patchify a 1D segment into [N, patch_size]."""
     trim_len = len(segment) - (len(segment) % patch_size)
     return segment[:trim_len].reshape(-1, patch_size)
 
 
 def patchify_batch(signals, patch_size=50):
-    """Patchify a batch: [B, L] → [B, N, patch_size]."""
-    B, L = signals.shape
-    trim_len = L - (L % patch_size)
-    return signals[:, :trim_len].reshape(B, -1, patch_size)
-
-
-# ============================================================================
-# Data Augmentation (for pre-training)
-# ============================================================================
+    """Patchify a batch [B, L] into [B, N, patch_size]."""
+    bsz, length = signals.shape
+    trim_len = length - (length % patch_size)
+    return signals[:, :trim_len].reshape(bsz, -1, patch_size)
 
 
 class ECGAugmentation:
-    """Random augmentations for ECG signals during self-supervised pre-training."""
+    """Pretraining augmentations for unlabeled segments."""
 
-    def __init__(self, scale_range=(0.9, 1.1), noise_std=0.01, time_shift_ratio=0.1):
+    def __init__(self, scale_range=(0.8, 1.2), noise_std=0.01, time_shift_ratio=0.1, sign_flip_prob=0.1):
         self.scale_range = scale_range
         self.noise_std = noise_std
         self.time_shift_ratio = time_shift_ratio
+        self.sign_flip_prob = sign_flip_prob
 
     def __call__(self, signal):
-        # Random amplitude scaling
-        scale = np.random.uniform(*self.scale_range)
-        signal = signal * scale
-        # Random circular time shift
-        max_shift = int(len(signal) * self.time_shift_ratio)
+        x = signal.astype(np.float32, copy=True)
+
+        scale = np.random.uniform(self.scale_range[0], self.scale_range[1])
+        x = x * scale
+
+        max_shift = int(len(x) * self.time_shift_ratio)
         if max_shift > 0:
-            shift = np.random.randint(-max_shift, max_shift)
-            signal = np.roll(signal, shift)
-        # Additive Gaussian noise
-        noise = np.random.normal(0, self.noise_std, signal.shape)
-        signal = signal + noise
-        return signal.astype(np.float32)
+            shift = np.random.randint(-max_shift, max_shift + 1)
+            x = np.roll(x, shift)
+
+        noise = np.random.normal(loc=0.0, scale=self.noise_std, size=x.shape).astype(np.float32)
+        x = x + noise
+
+        if np.random.rand() < self.sign_flip_prob:
+            x = -x
+
+        return x.astype(np.float32)
 
 
-# ============================================================================
-# PyTorch Datasets
-# ============================================================================
+class ECGAmplitudeOnlyAugmentation:
+    """Light augmentation for supervised fine-tuning training split."""
+
+    def __init__(self, scale_range=(0.9, 1.1)):
+        self.scale_range = scale_range
+
+    def __call__(self, signal):
+        x = signal.astype(np.float32, copy=True)
+        scale = np.random.uniform(self.scale_range[0], self.scale_range[1])
+        return (x * scale).astype(np.float32)
 
 
 class ECGPretrainDataset(Dataset):
-    """Dataset for self-supervised pre-training (no labels). Returns (signal,)."""
+    """Dataset for self-supervised pretraining (returns signal only)."""
 
     def __init__(self, segments, transform=None):
         self.segments = segments.astype(np.float32)
@@ -99,17 +96,18 @@ class ECGPretrainDataset(Dataset):
         return len(self.segments)
 
     def __getitem__(self, idx):
-        segment = self.segments[idx].copy()
+        segment = self.segments[idx].astype(np.float32, copy=True)
         if self.transform is not None:
             segment = self.transform(segment)
         return (torch.tensor(segment, dtype=torch.float32),)
 
 
 class ECGFinetuneDataset(Dataset):
-    """Dataset for supervised fine-tuning. Returns (signal, label)."""
+    """Dataset for supervised finetuning (returns signal and label)."""
 
     def __init__(self, segments, labels, transform=None):
-        assert len(segments) == len(labels)
+        if len(segments) != len(labels):
+            raise ValueError("segments and labels must have the same length")
         self.segments = segments.astype(np.float32)
         self.labels = labels.astype(np.int64)
         self.transform = transform
@@ -118,63 +116,52 @@ class ECGFinetuneDataset(Dataset):
         return len(self.segments)
 
     def __getitem__(self, idx):
-        segment = self.segments[idx].copy()
-        label = self.labels[idx]
+        segment = self.segments[idx].astype(np.float32, copy=True)
         if self.transform is not None:
             segment = self.transform(segment)
-        return (
-            torch.tensor(segment, dtype=torch.float32),
-            torch.tensor(label, dtype=torch.long),
-        )
-
-
-# ============================================================================
-# Few-Shot Sampling
-# ============================================================================
+        label = int(self.labels[idx])
+        return torch.tensor(segment, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
 
 
 def create_few_shot_split(labels, n_per_class, seed=42):
-    """
-    Stratified sampling: select n_per_class examples from each class.
-
-    Returns: np.ndarray of selected indices.
-    """
+    """Return indices with exactly n_per_class examples sampled per class when available."""
     rng = np.random.RandomState(seed)
+    selected_indices = []
     classes = np.unique(labels)
-    indices = []
+
     for cls in classes:
         cls_idx = np.where(labels == cls)[0]
         if len(cls_idx) < n_per_class:
-            print(
-                f"  ⚠ Class {cls}: only {len(cls_idx)} available "
-                f"(requested {n_per_class})"
+            raise ValueError(
+                f"Class {cls} has only {len(cls_idx)} examples, requested n_per_class={n_per_class}."
             )
-            selected = cls_idx
-        else:
-            selected = rng.choice(cls_idx, size=n_per_class, replace=False)
-        indices.extend(selected)
-    return np.array(indices)
+        picked = rng.choice(cls_idx, size=n_per_class, replace=False)
+        selected_indices.append(picked)
+
+    return np.concatenate(selected_indices)
 
 
 def create_data_splits(labels, train_ratio=0.8, val_ratio=0.1, seed=42):
-    """
-    Stratified train/val/test split.
+    """Backward-compatible stratified split utility."""
+    indices = np.arange(len(labels))
 
-    Returns: dict with 'train', 'val', 'test' index arrays.
-    """
-    rng = np.random.RandomState(seed)
-    classes = np.unique(labels)
-    train_idx, val_idx, test_idx = [], [], []
+    train_idx, temp_idx, y_train, y_temp = train_test_split(
+        indices,
+        labels,
+        train_size=train_ratio,
+        stratify=labels,
+        random_state=seed,
+    )
 
-    for cls in classes:
-        cls_idx = np.where(labels == cls)[0]
-        rng.shuffle(cls_idx)
-        n = len(cls_idx)
-        n_train = int(n * train_ratio)
-        n_val = int(n * val_ratio)
-        train_idx.extend(cls_idx[:n_train])
-        val_idx.extend(cls_idx[n_train : n_train + n_val])
-        test_idx.extend(cls_idx[n_train + n_val :])
+    remaining = 1.0 - train_ratio
+    val_size_in_temp = val_ratio / max(remaining, 1e-8)
+    val_idx, test_idx, _, _ = train_test_split(
+        temp_idx,
+        y_temp,
+        train_size=val_size_in_temp,
+        stratify=y_temp,
+        random_state=seed,
+    )
 
     return {
         "train": np.array(train_idx),
@@ -183,58 +170,106 @@ def create_data_splits(labels, train_ratio=0.8, val_ratio=0.1, seed=42):
     }
 
 
-# ============================================================================
-# DataLoader Factory
-# ============================================================================
+def _pad_beats_to_length(segments: np.ndarray, target_len: int = 400) -> np.ndarray:
+    """Pad/truncate beat windows to a fixed length for consistent patching."""
+    if segments.ndim != 2:
+        raise ValueError(f"Expected 2D array [N, L], got shape {segments.shape}")
+
+    n, length = segments.shape
+    if length == target_len:
+        return segments.astype(np.float32)
+
+    if length > target_len:
+        return segments[:, :target_len].astype(np.float32)
+
+    padded = np.zeros((n, target_len), dtype=np.float32)
+    start = (target_len - length) // 2
+    padded[:, start : start + length] = segments.astype(np.float32)
+    return padded
 
 
 def create_pretrain_dataloader(segments, batch_size=256, num_workers=2, augment=True):
-    """Create DataLoader for self-supervised pre-training."""
+    """Create pretraining DataLoader with optional augmentation."""
     transform = ECGAugmentation() if augment else None
-    dataset = ECGPretrainDataset(segments, transform=transform)
+    dataset = ECGPretrainDataset(segments=segments, transform=transform)
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=bool(augment),
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
     )
+
+    mode = "train" if augment else "val"
     print(
-        f"✓ Pre-train DataLoader: {len(dataset)} samples, "
-        f"batch_size={batch_size}, {len(loader)} batches"
+        f"{mode.capitalize()} pretrain loader | samples={len(dataset):,} | "
+        f"batch_size={batch_size} | batches={len(loader):,} | shuffle={bool(augment)}"
     )
     return loader
 
 
 def create_finetune_dataloaders(
-    segments, labels, n_shot=None, batch_size=32, num_workers=2, seed=42
+    segments,
+    labels,
+    n_shot=None,
+    batch_size=32,
+    num_workers=2,
+    seed=42,
 ):
+    """Create stratified few-shot train/val/test dataloaders for fine-tuning.
+
+    Strategy:
+      1) Choose exactly n_shot samples per class for train.
+      2) On remaining samples, use 10% stratified for validation.
+      3) Use the rest for test.
+      4) Pad beat inputs to length 400 so patch_size=100 yields 4 patches.
     """
-    Create train/val/test DataLoaders for fine-tuning.
+    rng = np.random.RandomState(seed)
+    segments = np.asarray(segments)
+    labels = np.asarray(labels)
 
-    Args:
-        segments: np.ndarray [N, L]
-        labels: np.ndarray [N]
-        n_shot: int or None — if set, subsample training to n_shot per class
-        batch_size: int
-        num_workers: int
-        seed: int
+    if segments.ndim != 2:
+        raise ValueError(f"Expected segments shape [N, L], got {segments.shape}")
 
-    Returns: dict with 'train', 'val', 'test' DataLoaders
-    """
-    splits = create_data_splits(labels, seed=seed)
+    padded_segments = _pad_beats_to_length(segments, target_len=400)
 
-    if n_shot is not None:
-        train_labels = labels[splits["train"]]
-        few_shot_idx = create_few_shot_split(train_labels, n_shot, seed)
-        train_indices = splits["train"][few_shot_idx]
-    else:
-        train_indices = splits["train"]
+    unique_classes = np.unique(labels)
+    if n_shot is None:
+        raise ValueError("n_shot must be provided for create_finetune_dataloaders")
 
-    train_ds = ECGFinetuneDataset(segments[train_indices], labels[train_indices])
-    val_ds = ECGFinetuneDataset(segments[splits["val"]], labels[splits["val"]])
-    test_ds = ECGFinetuneDataset(segments[splits["test"]], labels[splits["test"]])
+    train_indices_per_class = []
+    remaining_indices = []
+
+    for cls in unique_classes:
+        cls_idx = np.where(labels == cls)[0]
+        if len(cls_idx) < n_shot:
+            raise ValueError(
+                f"Class {cls} has {len(cls_idx)} samples but n_shot={n_shot} was requested"
+            )
+
+        picked = rng.choice(cls_idx, size=n_shot, replace=False)
+        train_indices_per_class.append(picked)
+
+        cls_remaining = np.setdiff1d(cls_idx, picked, assume_unique=False)
+        remaining_indices.append(cls_remaining)
+
+    train_idx = np.concatenate(train_indices_per_class)
+    rem_idx = np.concatenate(remaining_indices)
+    rem_labels = labels[rem_idx]
+
+    val_idx, test_idx = train_test_split(
+        rem_idx,
+        train_size=0.10,
+        stratify=rem_labels,
+        random_state=seed,
+    )
+
+    train_transform = ECGAmplitudeOnlyAugmentation(scale_range=(0.9, 1.1))
+    train_ds = ECGFinetuneDataset(padded_segments[train_idx], labels[train_idx], transform=train_transform)
+    val_ds = ECGFinetuneDataset(padded_segments[val_idx], labels[val_idx], transform=None)
+    test_ds = ECGFinetuneDataset(padded_segments[test_idx], labels[test_idx], transform=None)
 
     loaders = {
         "train": DataLoader(
@@ -259,8 +294,15 @@ def create_finetune_dataloaders(
             pin_memory=True,
         ),
     }
-    print(
-        f"✓ Fine-tune splits — Train: {len(train_ds)}, "
-        f"Val: {len(val_ds)}, Test: {len(test_ds)}"
-    )
+
+    def _counts(idxs):
+        vals, cnts = np.unique(labels[idxs], return_counts=True)
+        return {int(v): int(c) for v, c in zip(vals, cnts)}
+
+    print("Fine-tune split summary")
+    print(f"  Train: {len(train_ds):,} samples | class counts: {_counts(train_idx)}")
+    print(f"  Val:   {len(val_ds):,} samples | class counts: {_counts(val_idx)}")
+    print(f"  Test:  {len(test_ds):,} samples | class counts: {_counts(test_idx)}")
+    print("  Beat length padded to 400 samples for patch_size=100 compatibility")
+
     return loaders

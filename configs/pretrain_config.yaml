@@ -3,21 +3,21 @@
 # ============================================================
 
 model:
-  patch_size: 50 # samples per patch (100ms @ 500Hz)
-  embed_dim: 128 # transformer hidden dimension
-  depth: 6 # number of encoder layers
+  patch_size: 100 # samples per patch (200ms @ 500Hz)
+  embed_dim: 256 # transformer hidden dimension
+  depth: 8 # number of encoder layers
   num_heads: 8 # attention heads (head_dim = 128/8 = 16)
   mlp_ratio: 4 # MLP hidden = 128 * 4 = 512
   dropout: 0.1
-  decoder_depth: 2 # lightweight decoder
-  mask_ratio: 0.75 # aggressive masking (75%)
+  decoder_depth: 4 # stronger decoder
+  mask_ratio: 0.60 # moderate masking for stable learning
 
 training:
-  epochs: 100
-  batch_size: 256
+  epochs: 150
+  batch_size: 128
   learning_rate: 1.0e-4
   weight_decay: 0.05
-  warmup_epochs: 10
+  warmup_epochs: 20
   gradient_clip: 1.0
   num_workers: 2 # Colab limitation
 
